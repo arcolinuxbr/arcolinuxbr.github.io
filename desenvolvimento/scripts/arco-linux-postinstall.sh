@@ -586,7 +586,7 @@ configure_peripherals() {
     echo "================================================================"
 
     sudo pacman -S --needed --noconfirm \
-        cups cups-pk-helper system-config-printer cups-browsed \
+        cups cups-pk-helper system-config-printer cups-browsed hplip \
         sane sane-airscan \
         ipp-usb gutenprint foomatic-db foomatic-db-engine \
         foomatic-db-gutenprint-ppds \
