@@ -2,25 +2,23 @@
 #
 # ARCO LINUX BR - POST-INSTALL
 # "Arch que instala, conecta, usa e se recupera"
-# v3.3.1
-# Correções: pacote sane-utils removido (não existe no Arch atual),
-# GNOME Software não é encerrado via --quit, PAM preserva política do Arch,
-# firewall é reconstruído sem acumular regras e Samba não assume grupo privado.
+# v3.6.1 - EXPERIÊNCIA DOMÉSTICA COMPLETA + SNAP OFICIAL
 #
-# Revisão integral:
-#   - cada configuração que o Arco administra é substituída por uma
-#     configuração conhecida, depois de backup;
-#   - rede usa NetworkManager + systemd-resolved como arquitetura única;
-#   - CUPS, SANE, Samba, Avahi, Bluetooth, firewalld e libvirt recebem
-#     arquivos próprios recriados pelo Arco;
-#   - GNOME Keyring usa a configuração PAM esperada pelo GDM;
-#   - ~/Público é guest, leitura/escrita e deliberadamente público;
-#   - Network Guard permanece no boot e só reconstrói a rede quando o
-#     diagnóstico indica falha.
+# Inclui:
+# - Rede robusta + Network Guard
+# - GNOME completo + extensões (Dash-to-Dock, Dash-to-Panel, AppIndicator, User Theme)
+# - Codecs multimídia (VLC, Rhythmbox, GStreamer completo, VA-API)
+# - LibreOffice, Thunderbird, Firefox, Wine
+# - CUPS + SANE + Polkit (impressoras sem pedir senha)
+# - Samba com pastas Públicas guest
+# - Flatpak + Extension Manager
+# - Snapd + Snap Store (oficial)  ← instalado por padrão
+# - Temas Win11 + Yaru + Papirus
+# - Fontes Microsoft + Noto
 #
 # Uso:
-#   chmod +x arco-linux-postinstall-v3.3.1.sh
-#   ./arco-linux-postinstall-v3.3.1.sh
+#   chmod +x arco-linux-postinstall.sh
+#   ./arco-linux-postinstall.sh
 #
 # Opções:
 #   --skip-aur
@@ -34,7 +32,7 @@
 set -u
 set -o pipefail
 
-VERSION="3.3.0"
+VERSION="3.6.1"
 SCRIPT_NAME="$(basename "$0")"
 REAL_USER="${SUDO_USER:-${USER}}"
 REAL_HOME="$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)"
@@ -64,7 +62,7 @@ for arg in "$@"; do
             cat <<HELP
 Uso: $SCRIPT_NAME [opções]
 
-  --skip-aur              não instalar ttf-ms-fonts via AUR
+  --skip-aur              não instalar pacotes AUR
   --skip-virtualization   não instalar QEMU/libvirt/GNOME Boxes
   --skip-fonts            não instalar fontes adicionais
   --skip-flatpak          não instalar Flatpak/Flathub
@@ -85,8 +83,14 @@ HELP
     esac
 done
 
-mkdir -p "$LOG_DIR" "$STATE_DIR" "$RUN_BACKUP"
+sudo mkdir -p "$LOG_DIR" "$STATE_DIR" "$RUN_BACKUP"
+sudo touch "$LOG_FILE"
+sudo chown "$REAL_USER:$(id -gn "$REAL_USER")" "$LOG_FILE"
+sudo chmod 0640 "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
+
+PS4='\n[EXEC] ${BASH_SOURCE##*/}:${LINENO}: '
+set -x
 
 OK=0
 WARN=0
@@ -110,19 +114,11 @@ backup_item() {
 }
 
 replace_file() {
-    # replace_file DEST MODE CONTENT...
-    # stdin contém o novo conteúdo. O arquivo antigo já deve ter sido salvo.
     local dest="$1" mode="$2" tmp
     tmp="$(mktemp)"
     cat > "$tmp"
     sudo install -D -m "$mode" "$tmp" "$dest"
     rm -f "$tmp"
-}
-
-wipe_dir() {
-    local dir="$1"
-    sudo rm -rf "$dir"
-    sudo mkdir -p "$dir"
 }
 
 # ---------------------------------------------------------------------------
@@ -132,7 +128,7 @@ wipe_dir() {
 detect_environment() {
     echo
     echo "================================================================"
-    echo "1/18 - DETECÇÃO DO AMBIENTE"
+    echo "1/20 - DETECÇÃO DO AMBIENTE"
     echo "================================================================"
 
     local virt firmware kvm
@@ -162,21 +158,29 @@ detect_environment() {
 }
 
 # ---------------------------------------------------------------------------
-# 2. REDE - PRÉ-REQUISITOS E RECONSTRUÇÃO
+# 2. REDE - PRÉ-REQUISITOS
 # ---------------------------------------------------------------------------
 
 install_network_prerequisites() {
     echo
     echo "================================================================"
-    echo "2/18 - PRÉ-REQUISITOS DE REDE"
+    echo "2/20 - PRÉ-REQUISITOS DE REDE"
     echo "================================================================"
 
-    local pkgs=(networkmanager network-manager-applet nm-connection-editor wireless-regdb wpa_supplicant)
+    local pkgs=(
+        networkmanager network-manager-applet nm-connection-editor
+        wireless-regdb wpa_supplicant curl python iputils
+    )
+    info "PACMAN: instalando pré-requisitos de rede."
     sudo pacman -S --needed --noconfirm "${pkgs[@]}" || die "Não foi possível instalar a pilha de rede."
 
-    sudo systemctl unmask NetworkManager.service 2>/dev/null || true
-    sudo systemctl enable NetworkManager.service 2>/dev/null || true
-    ok "NetworkManager e suporte Wi-Fi disponíveis."
+    sudo systemctl unmask NetworkManager.service || true
+    sudo systemctl enable NetworkManager.service || true
+    command_exists nmcli || die "nmcli não ficou disponível."
+    command_exists curl || die "curl não ficou disponível."
+    command_exists python || die "python não ficou disponível."
+    command_exists ping || die "ping não ficou disponível."
+    ok "NetworkManager e pré-requisitos de rede disponíveis."
 }
 
 backup_network_config() {
@@ -189,7 +193,6 @@ backup_network_config() {
     backup_item /etc/netctl
     backup_item /etc/iwd
     backup_item /etc/wpa_supplicant
-    info "Backup de rede: $RUN_BACKUP/etc/"
 }
 
 stop_conflicting_managers() {
@@ -204,7 +207,7 @@ stop_conflicting_managers() {
     )
     local svc
     for svc in "${services[@]}"; do
-        sudo systemctl disable --now "$svc" 2>/dev/null || true
+        sudo systemctl disable --now "$svc" || true
     done
     sudo systemctl enable --now NetworkManager.service || die "NetworkManager não iniciou."
 }
@@ -247,7 +250,6 @@ connection.mdns=2
 connection.llmnr=0
 CONF
 
-    # Os perfis antigos são explicitamente removidos e recriados abaixo.
     sudo rm -rf /etc/NetworkManager/system-connections
     sudo mkdir -p /etc/NetworkManager/system-connections
     sudo chmod 700 /etc/NetworkManager/system-connections
@@ -290,16 +292,14 @@ network_test() {
 
 create_ethernet_profile() {
     local iface="$1" name="Arco Ethernet - $iface"
-    sudo nmcli connection delete "$name" >/dev/null 2>&1 || true
+    sudo nmcli connection delete "$name" || true
     sudo nmcli connection add type ethernet ifname "$iface" con-name "$name" \
         ipv4.method auto ipv6.method auto \
-        connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null 2>&1
-    sudo nmcli connection up "$name" >/dev/null 2>&1
+        connection.autoconnect yes connection.autoconnect-priority 100
+    sudo nmcli connection up "$name"
 }
 
 saved_wifi_from_backup() {
-    # Depois de limpar NM, as credenciais antigas ficam apenas no backup.
-    # O NetworkManager pode importar um perfil keyfile diretamente.
     local dir="$RUN_BACKUP/etc/NetworkManager/system-connections"
     [ -d "$dir" ] || return 1
     find "$dir" -maxdepth 1 -type f -name '*.nmconnection' -print 2>/dev/null
@@ -319,8 +319,8 @@ wifi_interactive_if_needed() {
     local iface ssid password name
     for iface in $(physical_interfaces); do
         is_wifi "$iface" || continue
-        sudo nmcli radio wifi on >/dev/null 2>&1 || true
-        sudo nmcli device wifi rescan ifname "$iface" >/dev/null 2>&1 || true
+        sudo nmcli radio wifi on || true
+        sudo nmcli device wifi rescan ifname "$iface" || true
         sleep 2
         echo
         echo "Wi-Fi disponível em $iface:"
@@ -328,17 +328,19 @@ wifi_interactive_if_needed() {
         echo
         read -r -p "SSID Wi-Fi (Enter para manter somente perfis salvos/pular): " ssid
         [ -n "$ssid" ] || continue
+        set +x
         read -r -s -p "Senha Wi-Fi: " password
         echo
         name="Arco WiFi - $ssid"
-        sudo nmcli connection delete "$name" >/dev/null 2>&1 || true
+        sudo nmcli connection delete "$name" || true
         if sudo nmcli connection add type wifi ifname "$iface" con-name "$name" ssid "$ssid" \
             wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$password" \
             ipv4.method auto ipv6.method auto \
             connection.autoconnect yes connection.autoconnect-priority 90 >/dev/null 2>&1; then
-            sudo nmcli connection up "$name" >/dev/null 2>&1 || true
+            sudo nmcli connection up "$name" || true
         fi
         unset password
+        set -x
         network_test && return 0
     done
     return 1
@@ -347,14 +349,12 @@ wifi_interactive_if_needed() {
 rebuild_network() {
     echo
     echo "================================================================"
-    echo "3/18 - RECONSTRUÇÃO LIMPA DA REDE"
+    echo "3/20 - RECONSTRUÇÃO LIMPA DA REDE"
     echo "================================================================"
 
     backup_network_config
     stop_conflicting_managers
 
-    # O Arco administra uma única pilha de rede. Configurações concorrentes
-    # são removidas, depois os arquivos oficiais do Arco são recriados.
     sudo rm -rf /etc/systemd/network
     sudo mkdir -p /etc/systemd/network
     sudo rm -rf /etc/dhcpcd.conf /etc/netctl /etc/iwd /etc/wpa_supplicant
@@ -365,7 +365,6 @@ rebuild_network() {
     sudo systemctl restart NetworkManager.service || die "NetworkManager não reiniciou."
     sleep 2
 
-    # Primeiro Ethernet. Em VMs KVM/QEMU normalmente é o caminho automático.
     local iface
     for iface in $(physical_interfaces); do
         is_ethernet "$iface" || continue
@@ -376,14 +375,13 @@ rebuild_network() {
         fi
     done
 
-    # Depois, perfis Wi-Fi antigos que foram preservados no backup.
     restore_saved_wifi_profiles
-    sudo nmcli connection reload >/dev/null 2>&1 || true
+    sudo nmcli connection reload || true
     for iface in $(physical_interfaces); do
         is_wifi "$iface" || continue
         while IFS= read -r name; do
             [ -n "$name" ] || continue
-            sudo nmcli connection up "$name" ifname "$iface" >/dev/null 2>&1 || continue
+            sudo nmcli connection up "$name" ifname "$iface" || continue
             sleep 3
             if network_test; then
                 ok "Internet restabelecida usando Wi-Fi salvo ($name)."
@@ -392,7 +390,6 @@ rebuild_network() {
         done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1}')
     done
 
-    # Sem credencial salva, solicita apenas o necessário ao usuário.
     if wifi_interactive_if_needed; then
         ok "Internet restabelecida pelo Wi-Fi informado."
         return 0
@@ -408,8 +405,9 @@ rebuild_network() {
 update_system() {
     echo
     echo "================================================================"
-    echo "4/18 - ATUALIZAÇÃO DO ARCH"
+    echo "4/20 - ATUALIZAÇÃO DO ARCH"
     echo "================================================================"
+    info "PACMAN: atualização completa do sistema."
     sudo pacman -Syu --noconfirm || die "Atualização do Arch falhou."
     ok "Arch atualizado."
 }
@@ -421,7 +419,7 @@ update_system() {
 install_gnome() {
     echo
     echo "================================================================"
-    echo "5/18 - GNOME E SOFTWARE CENTER"
+    echo "5/20 - GNOME E SOFTWARE CENTER"
     echo "================================================================"
 
     local pkgs=(
@@ -432,11 +430,12 @@ install_gnome() {
         gvfs gvfs-mtp gvfs-smb gvfs-dnssd gvfs-wsdd
         xdg-user-dirs xdg-utils
         curl wget git rsync python
-        file-roller 7zip unzip
+        file-roller 7zip unzip unrar
         firefox gnome-disk-utility gnome-system-monitor gnome-text-editor
         loupe baobab evince simple-scan
     )
 
+    info "PACMAN: instalando GNOME e componentes."
     sudo pacman -S --needed --noconfirm "${pkgs[@]}" || die "Falha na instalação do GNOME."
     sudo systemctl enable gdm.service
     sudo systemctl enable --now NetworkManager.service
@@ -446,7 +445,7 @@ install_gnome() {
 configure_gnome_keyring() {
     echo
     echo "================================================================"
-    echo "6/18 - GNOME KEYRING / PAM"
+    echo "6/20 - GNOME KEYRING / PAM"
     echo "================================================================"
 
     local pam_gdm kr_dir backup_dir
@@ -454,8 +453,6 @@ configure_gnome_keyring() {
 
     backup_item "$pam_gdm"
 
-    # GDM no Arch já usa system-local-login; estas são as linhas previstas
-    # pelo pacote/ArchWiki para o desbloqueio automático.
     replace_file "$pam_gdm" 0644 <<'PAM'
 #%PAM-1.0
 
@@ -471,16 +468,11 @@ session    include                     system-local-login
 session    optional                    pam_gnome_keyring.so auto_start
 PAM
 
-    # Não recriamos /etc/pam.d/passwd inteiro: isso poderia substituir a política
-    # de senha do pambase. Apenas garantimos a linha opcional do keyring uma vez.
     if ! grep -qE '^[[:space:]]*password[[:space:]]+optional[[:space:]]+pam_gnome_keyring\.so([[:space:]]|$)' /etc/pam.d/passwd 2>/dev/null; then
         backup_item /etc/pam.d/passwd
         printf '\npassword    optional    pam_gnome_keyring.so\n' | sudo tee -a /etc/pam.d/passwd >/dev/null
     fi
-    info "PAM passwd preservado; apenas a integração opcional do GNOME Keyring foi acrescentada."
 
-    # O problema da imagem normalmente é um Login Keyring cuja senha não
-    # coincide mais com a senha da conta. O conteúdo é preservado em backup.
     kr_dir="$REAL_HOME/.local/share/keyrings"
     local kr_marker="$STATE_DIR/gnome-keyring-reset-v2"
     if [ ! -e "$kr_marker" ]; then
@@ -496,9 +488,9 @@ PAM
         printf 'login\n' | sudo -u "$REAL_USER" tee "$kr_dir/default" >/dev/null
         chmod 600 "$kr_dir/default"
         sudo touch "$kr_marker"
-        warn "Login Keyring anterior foi resetado uma vez; segredos antigos ficaram no backup desta execução."
+        warn "Login Keyring anterior foi resetado uma vez; segredos antigos ficaram no backup."
     else
-        info "Reset do Login Keyring já realizado anteriormente; conteúdo atual será preservado."
+        info "Reset do Login Keyring já realizado anteriormente."
     fi
 
     ok "PAM/GDM recriados para desbloqueio automático do Login Keyring."
@@ -507,39 +499,164 @@ PAM
 configure_gnome_software() {
     echo
     echo "================================================================"
-    echo "7/18 - APPSTREAM / GNOME SOFTWARE"
+    echo "7/20 - APPSTREAM / GNOME SOFTWARE"
     echo "================================================================"
 
     sudo pacman -S --needed --noconfirm gnome-software appstream archlinux-appstream-data packagekit || \
         die "Falha no catálogo do GNOME Software."
 
-    # PackageKit no Arch inclui backend libalpm, mas a integração de instalação
-    # do GNOME Software é considerada unsupported pelo Arch. O objetivo aqui é
-    # garantir o catálogo AppStream dos pacotes Arch e não prometer uma camada
-    # de gerenciamento diferente do pacman.
     if [ -x /usr/bin/appstreamcli ]; then
         sudo appstreamcli refresh-cache >/dev/null 2>&1 || true
     fi
     sudo systemctl enable --now packagekit.service 2>/dev/null || true
-    # O GNOME Software pode estar rodando e, em algumas versões, --quit
-    # termina com SIGSEGV. Não precisamos executá-lo para reconstruir o cache;
-    # removemos apenas os caches do usuário e deixamos o processo existente
-    # reiniciar naturalmente.
     sudo -u "$REAL_USER" rm -rf "$REAL_HOME/.cache/gnome-software" "$REAL_HOME/.local/share/gnome-software" 2>/dev/null || true
 
     ok "Catálogo AppStream do Arch recriado/atualizado."
 }
 
 # ---------------------------------------------------------------------------
-# 8. HARDWARE / ÁUDIO / BLUETOOTH
+# 8. APLICATIVOS, MULTIMÍDIA E EXTENSÕES GNOME
+# ---------------------------------------------------------------------------
+
+install_apps_and_extensions() {
+    echo
+    echo "================================================================"
+    echo "8/20 - APLICATIVOS, MULTIMÍDIA E EXTENSÕES GNOME"
+    echo "================================================================"
+
+    info "PACMAN: instalando aplicativos, codecs e extensões."
+    sudo pacman -S --needed --noconfirm \
+        gedit \
+        gnome-tweaks \
+        gnome-shell-extensions \
+        gnome-shell-extension-appindicator \
+        gnome-shell-extension-user-theme \
+        libreoffice-fresh \
+        libreoffice-fresh-pt-br \
+        firefox \
+        firefox-i18n-pt-br \
+        thunderbird \
+        cups \
+        cups-pdf \
+        system-config-printer \
+        sane \
+        sane-airscan \
+        ipp-usb \
+        simple-scan \
+        hplip \
+        python-pyqt5 \
+        samba \
+        cifs-utils \
+        avahi \
+        nss-mdns \
+        bluez \
+        bluez-utils \
+        file-roller \
+        unrar \
+        7zip \
+        zip \
+        unzip \
+        git \
+        wget \
+        curl \
+        rsync \
+        gparted \
+        remmina \
+        baobab \
+        gnome-disk-utility \
+        deja-dup \
+        pavucontrol \
+        bash-completion \
+        fastfetch \
+        htop \
+        btop \
+        evince \
+        papirus-icon-theme \
+        variety \
+        wine \
+        winetricks \
+        vlc \
+        rhythmbox \
+        lame \
+        gstreamer \
+        gst-plugins-base \
+        gst-plugins-good \
+        gst-plugins-bad \
+        gst-plugins-ugly \
+        gst-libav \
+        || die "Falha ao instalar o conjunto de aplicativos e extensões."
+
+    install_aur_optional() {
+        local pkg="$1" build
+        [ "$SKIP_AUR" -eq 0 ] || { info "AUR ignorado: $pkg"; return 0; }
+
+        command_exists makepkg || {
+            warn "makepkg não está disponível; não foi possível instalar AUR: $pkg"
+            return 0
+        }
+
+        build="$STATE_DIR/build/aur-$pkg"
+        sudo rm -rf "$build"
+        sudo mkdir -p "$STATE_DIR/build"
+        sudo chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$STATE_DIR/build"
+
+        if sudo -u "$REAL_USER" git clone --depth=1 "https://aur.archlinux.org/$pkg.git" "$build" >/dev/null 2>&1; then
+            if sudo -u "$REAL_USER" bash -c "cd '$build' && makepkg -si --noconfirm"; then
+                ok "AUR instalado: $pkg"
+            else
+                warn "AUR não pôde ser instalado: $pkg"
+            fi
+        else
+            warn "AUR não pôde ser obtido: $pkg"
+        fi
+        sudo rm -rf "$build"
+    }
+
+    install_aur_optional gnome-shell-extension-dash-to-dock
+    install_aur_optional gnome-shell-extension-dash-to-panel
+    install_aur_optional hunspell-pt-br
+    install_aur_optional yaru-gtk-theme
+
+    # Habilita extensões
+    local ext current
+    for ext in \
+        dash-to-dock@micxgx.gmail.com \
+        dash-to-panel@jderose9.github.com \
+        appindicatorsupport@rgcjonas.gmail.com \
+        user-theme@gnome-shell-extensions.gcampax.github.com
+    do
+        current="$(sudo -u "$REAL_USER" gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo "[]")"
+        case "$current" in
+            *"$ext"*) continue ;;
+        esac
+        if [ "$current" = "[]" ] || [ -z "$current" ]; then
+            sudo -u "$REAL_USER" gsettings set org.gnome.shell enabled-extensions "['$ext']" 2>/dev/null || true
+        else
+            local merged
+            merged="$(printf '%s' "$current" | sed "s/^\[//;s/\]$//")"
+            if [ -n "$merged" ]; then
+                merged="[$merged, '$ext']"
+            else
+                merged="['$ext']"
+            fi
+            sudo -u "$REAL_USER" gsettings set org.gnome.shell enabled-extensions "$merged" 2>/dev/null || true
+        fi
+    done
+
+    ok "Aplicativos, multimídia e extensões GNOME instalados."
+}
+
+# ---------------------------------------------------------------------------
+# 9. HARDWARE / ÁUDIO / BLUETOOTH + VA-API
 # ---------------------------------------------------------------------------
 
 install_hardware() {
     echo
     echo "================================================================"
-    echo "8/18 - HARDWARE, ÁUDIO E BLUETOOTH"
+    echo "9/20 - HARDWARE, ÁUDIO, BLUETOOTH E ACELERAÇÃO DE VÍDEO"
     echo "================================================================"
 
+    info "PACMAN: instalando pilha de hardware."
     sudo pacman -S --needed --noconfirm \
         linux-firmware sof-firmware \
         alsa-utils pipewire pipewire-alsa pipewire-pulse wireplumber \
@@ -558,33 +675,36 @@ PairableTimeout = 0
 AutoEnable=true
 CONF
 
-    sudo systemctl enable --now bluetooth.service 2>/dev/null || warn "Bluetooth não iniciou."
+    sudo systemctl enable --now bluetooth.service || warn "Bluetooth não iniciou."
 
-    # GPU: não forçamos um driver proprietário se não houver necessidade.
     if lspci 2>/dev/null | grep -qi nvidia; then
-        sudo pacman -S --needed --noconfirm nvidia-open nvidia-utils 2>/dev/null || \
-            warn "NVIDIA detectada; nvidia-open não pôde ser instalado automaticamente."
+        info "NVIDIA detectada — instalando drivers e VA-API."
+        sudo pacman -S --needed --noconfirm nvidia-open nvidia-utils libva-nvidia-driver 2>/dev/null || \
+            warn "NVIDIA detectada; drivers não puderam ser instalados automaticamente."
     fi
     if lspci 2>/dev/null | grep -Eqi 'AMD.*VGA|AMD.*Display|ATI.*VGA'; then
+        info "AMD detectada — instalando mesa + VA-API."
         sudo pacman -S --needed --noconfirm mesa vulkan-radeon libva-mesa-driver 2>/dev/null || true
     fi
     if lspci 2>/dev/null | grep -Eqi 'Intel.*VGA|Intel.*Display'; then
+        info "Intel detectada — instalando mesa + media-driver."
         sudo pacman -S --needed --noconfirm mesa vulkan-intel intel-media-driver 2>/dev/null || true
     fi
 
-    ok "Hardware e Bluetooth preparados."
+    ok "Hardware, Bluetooth e aceleração de vídeo preparados."
 }
 
 # ---------------------------------------------------------------------------
-# 9. PERIFÉRICOS - CUPS / SANE
+# 10. PERIFÉRICOS - CUPS / SANE + Polkit
 # ---------------------------------------------------------------------------
 
 configure_peripherals() {
     echo
     echo "================================================================"
-    echo "9/18 - IMPRESSORAS E SCANNERS"
+    echo "10/20 - IMPRESSORAS E SCANNERS"
     echo "================================================================"
 
+    info "PACMAN: instalando pilha de impressão/scanner."
     sudo pacman -S --needed --noconfirm \
         cups cups-pk-helper system-config-printer cups-browsed hplip \
         sane sane-airscan \
@@ -593,7 +713,17 @@ configure_peripherals() {
         avahi nss-mdns bluez-cups acl || \
         die "Falha na pilha de impressão/scanner."
 
-    # Cada arquivo administrado pelo Arco é substituído por uma versão conhecida.
+    # Polkit: permite gerenciar impressoras sem pedir senha
+    sudo mkdir -p /etc/polkit-1/rules.d
+    sudo tee /etc/polkit-1/rules.d/49-printer.rules >/dev/null <<'POLKIT'
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.opensuse.cupspkhelper.") == 0 ||
+        action.id.indexOf("org.cups.cupsd.") == 0) {
+        return polkit.Result.YES;
+    }
+});
+POLKIT
+
     backup_item /etc/cups/cupsd.conf
     backup_item /etc/cups/client.conf
     backup_item /etc/sane.d/saned.conf
@@ -608,6 +738,7 @@ Listen localhost:631
 Listen 0.0.0.0:631
 Browsing Yes
 BrowseLocalProtocols dnssd
+DefaultShared Yes
 DefaultAuthType Basic
 WebInterface Yes
 IdleExitTimeout 0
@@ -658,13 +789,8 @@ IdleExitTimeout 0
 </Policy>
 CUPS
 
-    # O cliente usa Avahi/DNS-SD para descobrir impressoras locais/remotas.
     sudo rm -f /etc/cups/client.conf
 
-    # saned só é necessário para compartilhar scanners locais; AirScan continua
-    # sendo o método preferencial para scanners de rede. O access-list é
-    # recriado com as sub-redes reais da máquina, porque @LOCAL não é uma
-    # sintaxe válida para saned.conf.
     sudo tee /usr/local/sbin/arco-sane-share-sync >/dev/null <<'SYNC'
 #!/usr/bin/env bash
 set -u
@@ -710,29 +836,26 @@ TIMER
     sudo chmod 1777 /var/spool/samba
 
     sudo systemctl enable --now cups.service || die "CUPS não iniciou."
-    sudo cupsctl --share-printers --remote-any --remote-admin >/dev/null 2>&1 || true
     sudo systemctl enable --now avahi-daemon.service || warn "Avahi não iniciou."
-    sudo systemctl enable --now ipp-usb.service 2>/dev/null || warn "ipp-usb não iniciou."
-    sudo systemctl enable --now cups-browsed.service 2>/dev/null || true
-    sudo systemctl enable --now saned.socket 2>/dev/null || true
+    sudo systemctl enable --now ipp-usb.service || warn "ipp-usb não iniciou."
+    sudo systemctl enable --now cups-browsed.service || true
+    sudo systemctl enable --now saned.socket || true
     sudo systemctl daemon-reload
-    sudo systemctl enable --now arco-sane-share-sync.timer 2>/dev/null || true
+    sudo systemctl enable --now arco-sane-share-sync.timer || true
 
-    # Gera/atualiza PPDs do Gutenprint quando a ferramenta existir.
     command_exists cups-genppdupdate && sudo cups-genppdupdate >/dev/null 2>&1 || true
     sudo systemctl restart cups.service
 
-    ok "Impressão USB/rede/IPP e scanners USB/AirScan preparados."
+    ok "Impressão USB/rede/IPP e scanners USB/AirScan preparados (com Polkit)."
 }
 
 # ---------------------------------------------------------------------------
-# 10. SAMBA + PÚBLICO
+# 11. SAMBA + PÚBLICO
 # ---------------------------------------------------------------------------
 
 write_public_share_sync() {
     sudo tee /usr/local/sbin/arco-public-share-sync >/dev/null <<'SYNC'
 #!/usr/bin/env bash
-# Arco Linux BR - ~/Público é deliberadamente público.
 set -u
 
 CONF=/etc/samba/smb.conf
@@ -756,7 +879,6 @@ while IFS=: read -r user home shell; do
   chown "$user:" "$home/Público" 2>/dev/null || true
   chmod 0777 "$home/Público" 2>/dev/null || true
 
-  # O guest precisa atravessar somente o diretório home até a área pública.
   if command -v setfacl >/dev/null 2>&1; then
     setfacl -m "u:nobody:--x" "$home" 2>/dev/null || true
     setfacl -m "u:nobody:rwx" "$home/Público" 2>/dev/null || true
@@ -794,9 +916,10 @@ SYNC
 configure_samba() {
     echo
     echo "================================================================"
-    echo "10/18 - SAMBA + PASTAS PÚBLICAS"
+    echo "11/20 - SAMBA + PASTAS PÚBLICAS"
     echo "================================================================"
 
+    info "PACMAN: instalando Samba."
     sudo pacman -S --needed --noconfirm samba smbclient wsdd gvfs-wsdd acl || \
         die "Falha no Samba."
 
@@ -851,8 +974,8 @@ SMB
     sudo /usr/local/sbin/arco-public-share-sync || die "Configuração dos compartilhamentos Públicos inválida."
     testparm -s >/dev/null 2>&1 || die "smb.conf inválido."
     sudo systemctl enable --now smb.service || die "smb.service não iniciou."
-    sudo systemctl enable --now wsdd.service 2>/dev/null || true
-    sudo systemctl enable --now wsdd-discovery.service 2>/dev/null || true
+    sudo systemctl enable --now wsdd.service || true
+    sudo systemctl enable --now wsdd-discovery.service || true
 
     sudo rm -f /etc/systemd/system/arco-public-share-sync.service /etc/systemd/system/arco-public-share-sync.timer
     sudo tee /etc/systemd/system/arco-public-share-sync.service >/dev/null <<'UNIT'
@@ -886,22 +1009,24 @@ TIMER
 }
 
 # ---------------------------------------------------------------------------
-# 11. FONTES
+# 12. FONTES
 # ---------------------------------------------------------------------------
 
 install_fonts() {
     echo
     echo "================================================================"
-    echo "11/18 - FONTES"
+    echo "12/20 - FONTES"
     echo "================================================================"
 
     [ "$SKIP_FONTS" -eq 0 ] || { info "Fontes ignoradas."; return 0; }
+    info "PACMAN: instalando fontes."
     sudo pacman -S --needed --noconfirm \
         fontconfig freetype2 noto-fonts noto-fonts-cjk noto-fonts-emoji \
         ttf-dejavu ttf-liberation ttf-croscore ttf-carlito ttf-caladea || \
         die "Falha nas fontes."
 
     if [ "$SKIP_AUR" -eq 0 ]; then
+        info "Instalando Microsoft Core Fonts via AUR..."
         sudo pacman -S --needed --noconfirm base-devel git || true
         local build="$STATE_DIR/build/ttf-ms-fonts"
         sudo rm -rf "$build"
@@ -914,26 +1039,24 @@ install_fonts() {
         fi
     fi
     sudo fc-cache -f >/dev/null 2>&1 || true
-    ok "Fontes configuradas."
+    ok "Fontes configuradas (incluindo Microsoft Core Fonts)."
 }
 
 # ---------------------------------------------------------------------------
-# 12. APPIMAGEHUB
+# 13. APPIMAGEHUB
 # ---------------------------------------------------------------------------
 
 install_appimagehub() {
     echo
     echo "================================================================"
-    echo "12/18 - APPIMAGE / APPIMAGEHUB"
+    echo "13/20 - APPIMAGE / APPIMAGEHUB"
     echo "================================================================"
 
     [ "$MINIMAL" -eq 0 ] || { info "AppImageHub ignorado no modo minimal."; return 0; }
+    info "PACMAN: instalando suporte a AppImage."
     sudo pacman -S --needed --noconfirm fuse2 libappimage xdg-utils || \
         warn "Suporte base a AppImage não pôde ser instalado."
 
-    # O catálogo AppImageHub é disponibilizado por navegador. Não fazemos
-    # download de um binário "latest" de URL variável: isso tornaria o
-    # pós-install frágil quando o upstream mudar o nome do asset.
     sudo rm -f /usr/local/bin/appimage-cli-tool 2>/dev/null || true
 
     sudo tee /usr/share/applications/arco-appimagehub.desktop >/dev/null <<'DESKTOP'
@@ -948,35 +1071,130 @@ Categories=Utility;System;
 Keywords=AppImage;AppImageHub;Software;
 DESKTOP
     sudo chmod 644 /usr/share/applications/arco-appimagehub.desktop
-    ok "AppImageHub/AppImage CLI preparados."
+    ok "AppImageHub preparado."
 }
 
 # ---------------------------------------------------------------------------
-# 13. FLATPAK
+# 14. FLATPAK + Extension Manager
 # ---------------------------------------------------------------------------
 
 configure_flatpak() {
     echo
     echo "================================================================"
-    echo "13/18 - FLATPAK"
+    echo "14/20 - FLATPAK + EXTENSION MANAGER"
     echo "================================================================"
     [ "$SKIP_FLATPAK" -eq 0 ] && [ "$MINIMAL" -eq 0 ] || { info "Flatpak ignorado."; return 0; }
+    info "PACMAN: instalando Flatpak."
     sudo pacman -S --needed --noconfirm flatpak || { warn "Flatpak não instalado."; return 0; }
     sudo -u "$REAL_USER" flatpak remote-delete flathub >/dev/null 2>&1 || true
     sudo -u "$REAL_USER" flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || true
-    ok "Flathub recriado."
+
+    info "Instalando Extension Manager via Flatpak..."
+    sudo -u "$REAL_USER" flatpak install -y flathub com.mattjakeman.ExtensionManager || \
+        warn "Extension Manager não pôde ser instalado via Flatpak."
+
+    ok "Flathub + Extension Manager recriados."
 }
 
 # ---------------------------------------------------------------------------
-# 14. FIREWALL
+# 15. SNAP + SNAP STORE (instalado por padrão)
+# ---------------------------------------------------------------------------
+
+configure_snap() {
+    echo
+    echo "================================================================"
+    echo "15/20 - SNAP + SNAP STORE (OFICIAL)"
+    echo "================================================================"
+
+    [ "$MINIMAL" -eq 0 ] || { info "Snap ignorado no modo minimal."; return 0; }
+
+    if [ "$SKIP_AUR" -eq 1 ]; then
+        warn "Snap requer AUR. Remova --skip-aur para instalar o Snap."
+        return 0
+    fi
+
+    info "Instalando Snapd + Snap Store (central oficial)..."
+
+    sudo pacman -S --needed --noconfirm base-devel git || true
+
+    local build="$STATE_DIR/build/snapd"
+    sudo rm -rf "$build"
+    sudo mkdir -p "$STATE_DIR/build"
+    sudo chown -R "$REAL_USER:$(id -gn "$REAL_USER")" "$STATE_DIR/build"
+
+    if sudo -u "$REAL_USER" git clone --depth=1 https://aur.archlinux.org/snapd.git "$build" >/dev/null 2>&1; then
+        if sudo -u "$REAL_USER" bash -c "cd '$build' && makepkg -si --noconfirm"; then
+            sudo systemctl enable --now snapd.socket
+            sudo systemctl enable --now snapd.service
+            sudo ln -sf /var/lib/snapd/snap /snap
+
+            info "Aguardando o Snapd inicializar..."
+            sleep 6
+
+            if sudo snap install snap-store; then
+                ok "Snapd + Snap Store instalados com sucesso."
+            else
+                warn "Snapd instalado, mas a Snap Store falhou. Execute depois: sudo snap install snap-store"
+            fi
+        else
+            warn "Falha ao compilar/instalar o snapd via AUR."
+        fi
+    else
+        warn "Não foi possível baixar o snapd do AUR."
+    fi
+
+    sudo rm -rf "$build"
+}
+
+# ---------------------------------------------------------------------------
+# 16. TEMAS WIN11
+# ---------------------------------------------------------------------------
+
+install_win11_themes() {
+    echo
+    echo "================================================================"
+    echo "16/20 - TEMAS E ÍCONES WINDOWS 11"
+    echo "================================================================"
+    [ "$MINIMAL" -eq 0 ] || { info "Temas Win11 ignorados no modo minimal."; return 0; }
+
+    local build_dir
+    build_dir="$(mktemp -d)"
+    cd "$build_dir" || return 0
+
+    info "Clonando e instalando Win11 GTK Theme..."
+    if sudo -u "$REAL_USER" git clone --depth=1 https://github.com/yeyushengfan258/Win11-gtk-theme.git 2>/dev/null; then
+        cd Win11-gtk-theme || true
+        sudo ./install.sh || warn "Falha ao instalar Win11-gtk-theme."
+        cd ..
+    else
+        warn "Não foi possível clonar Win11-gtk-theme."
+    fi
+
+    info "Clonando e instalando Win11 Icon Theme..."
+    if sudo -u "$REAL_USER" git clone --depth=1 https://github.com/yeyushengfan258/Win11-icon-theme.git 2>/dev/null; then
+        cd Win11-icon-theme || true
+        sudo ./install.sh || warn "Falha ao instalar Win11-icon-theme."
+        cd ..
+    else
+        warn "Não foi possível clonar Win11-icon-theme."
+    fi
+
+    cd /
+    rm -rf "$build_dir"
+    ok "Temas e ícones Windows 11 instalados (aplicáveis via GNOME Tweaks)."
+}
+
+# ---------------------------------------------------------------------------
+# 17. FIREWALL
 # ---------------------------------------------------------------------------
 
 configure_firewall() {
     echo
     echo "================================================================"
-    echo "14/18 - FIREWALL + LAN"
+    echo "17/20 - FIREWALL + LAN"
     echo "================================================================"
     [ "$NO_FIREWALL" -eq 0 ] && [ "$MINIMAL" -eq 0 ] || { info "Firewall ignorado."; return 0; }
+    info "PACMAN: instalando firewalld."
     sudo pacman -S --needed --noconfirm firewalld || { warn "firewalld não instalado."; return 0; }
     sudo systemctl enable --now firewalld.service || { warn "firewalld não iniciou."; return 0; }
 
@@ -999,8 +1217,7 @@ CONF
 sync_firewall_lan() {
     command_exists firewall-cmd || return 0
     systemctl is-active --quiet firewalld.service 2>/dev/null || return 0
-    local zone="arco-lan" iface net
-    # O Arco não acumula regras antigas: a zona é destruída e recriada a cada sincronização.
+    local zone="arco-lan"
     sudo firewall-cmd --permanent --delete-zone="$zone" >/dev/null 2>&1 || true
     sudo mkdir -p /etc/firewalld/services
     sudo rm -f /etc/firewalld/services/arco-sane.xml
@@ -1013,6 +1230,7 @@ sync_firewall_lan() {
   <port protocol="tcp" port="10000-10100"/>
 </service>
 XML
+    sudo firewall-cmd --reload >/dev/null 2>&1 || return 1
     sudo firewall-cmd --permanent --new-zone="$zone" >/dev/null 2>&1 || return 1
     for service in mdns samba ipp arco-sane wsdd wsdd-discovery; do
         sudo firewall-cmd --permanent --zone="$zone" --add-service="$service" >/dev/null 2>&1 || true
@@ -1020,12 +1238,12 @@ XML
     while IFS= read -r net; do
         [ -n "$net" ] || continue
         sudo firewall-cmd --permanent --zone="$zone" --add-source="$net" >/dev/null 2>&1 || true
-    done < <(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | python -c 'import ipaddress,sys; [print(ipaddress.ip_interface(x.strip()).network) for x in sys.stdin if x.strip()]' 2>/dev/null | sort -u)
-    while IFS=: read -r iface state; do
-        [ "$state" = "connected" ] || continue
-        case "$iface" in lo|virbr*|docker*|veth*|br-*|tun*|tap*|wg*) continue ;; esac
-        sudo firewall-cmd --permanent --zone="$zone" --change-interface="$iface" >/dev/null 2>&1 || true
-    done < <(nmcli -t -f DEVICE,STATE device status 2>/dev/null)
+    done < <(
+        ip -4 -o addr show scope global 2>/dev/null |
+        awk '$2 !~ /^(lo|virbr|docker|veth|br-|tun|tap|wg)/ {print $4}' |
+        python -c 'import ipaddress,sys; [print(ipaddress.ip_interface(x.strip()).network) for x in sys.stdin if x.strip() and ipaddress.ip_interface(x.strip()).ip.is_private]'
+        2>/dev/null | sort -u
+    )
     sudo firewall-cmd --reload >/dev/null 2>&1 || true
 }
 
@@ -1038,6 +1256,17 @@ set -u
 command -v firewall-cmd >/dev/null 2>&1 || exit 0
 systemctl is-active --quiet firewalld.service 2>/dev/null || exit 0
 ZONE=arco-lan
+mkdir -p /etc/firewalld/services
+cat >/etc/firewalld/services/arco-sane.xml <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Arco SANE</short>
+  <description>Scanner sharing for the Arco Linux BR LAN</description>
+  <port protocol="tcp" port="6566"/>
+  <port protocol="tcp" port="10000-10100"/>
+</service>
+XML
+firewall-cmd --reload >/dev/null 2>&1 || exit 1
 firewall-cmd --permanent --delete-zone="$ZONE" >/dev/null 2>&1 || true
 firewall-cmd --permanent --new-zone="$ZONE" >/dev/null 2>&1 || exit 1
 for service in mdns samba ipp arco-sane wsdd wsdd-discovery; do
@@ -1046,12 +1275,12 @@ done
 while IFS= read -r net; do
   [ -n "$net" ] || continue
   firewall-cmd --permanent --zone="$ZONE" --add-source="$net" >/dev/null 2>&1 || true
-done < <(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | python -c 'import ipaddress,sys; [print(ipaddress.ip_interface(x.strip()).network) for x in sys.stdin if x.strip()]' 2>/dev/null | sort -u)
-while IFS=: read -r iface state; do
-  [ "$state" = connected ] || continue
-  case "$iface" in lo|virbr*|docker*|veth*|br-*|tun*|tap*|wg*) continue;; esac
-  firewall-cmd --zone="$ZONE" --change-interface="$iface" >/dev/null 2>&1 || true
-done < <(nmcli -t -f DEVICE,STATE device status 2>/dev/null)
+done < <(
+  ip -4 -o addr show scope global 2>/dev/null |
+  awk '$2 !~ /^(lo|virbr|docker|veth|br-|tun|tap|wg)/ {print $4}' |
+  python -c 'import ipaddress,sys; [print(ipaddress.ip_interface(x.strip()).network) for x in sys.stdin if x.strip() and ipaddress.ip_interface(x.strip()).ip.is_private]'
+  2>/dev/null | sort -u
+)
 firewall-cmd --reload >/dev/null 2>&1 || true
 SYNC
     sudo chmod 755 /usr/local/sbin/arco-lan-firewall-sync
@@ -1083,7 +1312,7 @@ TIMER
 }
 
 # ---------------------------------------------------------------------------
-# 15. VIRTUALIZAÇÃO
+# 18. VIRTUALIZAÇÃO
 # ---------------------------------------------------------------------------
 
 host_networks() {
@@ -1161,34 +1390,34 @@ XML
 install_virtualization() {
     echo
     echo "================================================================"
-    echo "15/18 - QEMU / KVM / GNOME BOXES / SPICE"
+    echo "18/20 - QEMU / KVM / GNOME BOXES / SPICE"
     echo "================================================================"
     [ "$SKIP_VIRTUALIZATION" -eq 0 ] && [ "$MINIMAL" -eq 0 ] || { info "Virtualização ignorada."; return 0; }
+    info "PACMAN: instalando virtualização."
     sudo pacman -S --needed --noconfirm \
         qemu-desktop qemu-img libvirt virt-manager virt-viewer virt-install \
         gnome-boxes spice-gtk spice-protocol spice-vdagent qemu-guest-agent \
         usbredir virtiofsd edk2-ovmf swtpm || die "Falha na virtualização."
-    sudo systemctl enable --now libvirtd.service 2>/dev/null || true
-    sudo systemctl enable --now virtlogd.socket 2>/dev/null || true
-    sudo systemctl enable qemu-guest-agent.service 2>/dev/null || true
+    sudo systemctl enable --now libvirtd.service || true
+    sudo systemctl enable --now virtlogd.socket || true
+    sudo systemctl enable qemu-guest-agent.service || true
     sudo usermod -aG libvirt "$REAL_USER" 2>/dev/null || true
     configure_libvirt
     ok "Virtualização configurada."
 }
 
 # ---------------------------------------------------------------------------
-# 16. NETWORK GUARD PERMANENTE
+# 19. NETWORK GUARD
 # ---------------------------------------------------------------------------
 
 install_network_guard() {
     echo
     echo "================================================================"
-    echo "16/18 - ARCO NETWORK GUARD"
+    echo "19/20 - ARCO NETWORK GUARD"
     echo "================================================================"
     sudo mkdir -p /usr/local/libexec "$STATE_DIR/network" "$LOG_DIR"
     sudo tee /usr/local/libexec/arco-network-guard >/dev/null <<'GUARD'
 #!/usr/bin/env bash
-# Arco Linux BR Network Guard
 set -u
 STATE=/var/lib/arco-linux/network
 LOG=/var/log/arco-linux/network-guard.log
@@ -1242,7 +1471,7 @@ rebuild(){
   local i name
   for i in $(physical_interfaces); do
     is_eth "$i" || continue; ip link set "$i" up >/dev/null 2>&1 || true; name="Arco Ethernet - $i"; nmcli connection delete "$name" >/dev/null 2>&1 || true
-    nmcli connection add type ethernet ifname "$i" con-name "$name" ipv4.method auto ipv6.method auto connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null 2>&1 || continue
+    nmcli connection add type ethernet ifname "$i" con-name "$name" ipv4.method auto ipv6.method auto connection.autoconnect yes connection.autoconnect-priority 100 || continue
     nmcli connection up "$name" >/dev/null 2>&1 || continue; sleep 2; network_ok && return 0
   done
   if [ -d "$b/NetworkManager/system-connections" ]; then
@@ -1297,13 +1526,13 @@ UNIT
 }
 
 # ---------------------------------------------------------------------------
-# 17. VALIDAÇÃO
+# 20. VALIDAÇÃO FINAL
 # ---------------------------------------------------------------------------
 
 validate_configuration() {
     echo
     echo "================================================================"
-    echo "17/18 - VALIDAÇÃO DAS CONFIGURAÇÕES"
+    echo "20/20 - VALIDAÇÃO DAS CONFIGURAÇÕES"
     echo "================================================================"
     if command_exists testparm && testparm -s >/dev/null 2>&1; then ok "Samba: configuração válida."; else warn "Samba: testparm não passou."; fi
     if command_exists cupsd && cupsd -t >/dev/null 2>&1; then ok "CUPS: configuração válida."; else warn "CUPS: cupsd -t não passou."; fi
@@ -1314,14 +1543,10 @@ validate_configuration() {
     [ "$NO_FIREWALL" -eq 0 ] && [ "$MINIMAL" -eq 0 ] && systemctl is-active --quiet firewalld.service 2>/dev/null && sync_firewall_lan || true
 }
 
-# ---------------------------------------------------------------------------
-# 18. FINAL
-# ---------------------------------------------------------------------------
-
 final_validation() {
     echo
     echo "================================================================"
-    echo "18/18 - VALIDAÇÃO FINAL"
+    echo "VALIDAÇÃO FINAL"
     echo "================================================================"
     network_test || die "A Internet não passou na validação final. O sistema não será declarado pronto."
     ok "Internet: OK."
@@ -1332,34 +1557,43 @@ final_validation() {
     for s in NetworkManager systemd-resolved gdm cups avahi-daemon smb arco-network-guard; do printf '  %-24s ' "$s"; systemctl is-active "$s.service" 2>/dev/null || true; done
     echo
     echo "================================================================"
-    echo "ARCO LINUX BR - INSTALAÇÃO CONCLUÍDA"
+    echo "ARCO LINUX BR - INSTALAÇÃO CONCLUÍDA (v$VERSION)"
     echo "================================================================"
-    echo "Rede:             NetworkManager + systemd-resolved"
-    echo "GNOME:            configurado"
+    echo "Rede:             NetworkManager + systemd-resolved + Network Guard"
+    echo "GNOME:            completo + extensões (Dock, Panel, AppIndicator, User Theme)"
     echo "Keyring:          PAM/GDM recriado"
-    echo "GNOME Software:   AppStream Arch + Flatpak quando habilitado"
-    echo "Impressão:        CUPS + IPP + Avahi + Bluetooth + Samba"
-    echo "Scanners:         SANE + AirScan/eSCL/WSD + IPP-USB"
+    echo "Aplicativos:      LibreOffice, Thunderbird, Firefox, VLC, Rhythmbox, Wine"
+    echo "Multimídia:       Codecs GStreamer completos + VA-API"
+    echo "GNOME Software:   AppStream Arch + Flatpak + Extension Manager"
+    echo "Snap:             Snapd + Snap Store (central oficial) instalados"
+    echo "Temas:            Yaru + Papirus + Win11 GTK/Ícones"
+    echo "Impressão:        CUPS + IPP + Avahi + Bluetooth + Samba + Polkit"
+    echo "Scanners:         SANE + AirScan + IPP-USB"
     echo "Público:          guest + leitura/escrita + symlinks"
-    echo "Network Guard:    ativo no boot"
     echo "Backups:          $RUN_BACKUP"
     echo "Log:              $LOG_FILE"
     echo
-    echo "Comandos:"
+    echo "Comandos úteis:"
     echo "  sudo arco-network-guard --status"
-    echo "  sudo arco-network-guard --check"
     echo "  sudo arco-network-guard --repair"
     echo "  sudo arco-network-guard --rebuild"
     echo "  lpstat -p -d"
     echo "  scanimage -L"
     echo "  smbclient -L localhost -N"
+    echo "  snap find <app>"
+    echo
+    echo "Reinicie o sistema para aplicar todas as extensões, temas e o Snap Store."
 }
 
 main() {
     [ "$(id -u)" -ne 0 ] || die "Execute como usuário normal; o script usa sudo."
     [ -f /etc/arch-release ] || die "Este script é destinado ao Arch Linux."
+    [ -n "$REAL_USER" ] || die "Não foi possível determinar o usuário real."
+    getent passwd "$REAL_USER" >/dev/null 2>&1 || die "Usuário real '$REAL_USER' não existe."
+    [ "$(id -u "$REAL_USER" 2>/dev/null || echo 0)" -ge 1000 ] || die "O usuário real precisa ser uma conta normal (UID >= 1000)."
     command_exists sudo || die "sudo não está instalado."
     sudo -v || die "Não foi possível autenticar sudo."
+
     detect_environment
     install_network_prerequisites
     rebuild_network || die "Não foi possível estabelecer Internet após a reconstrução da rede."
@@ -1367,12 +1601,15 @@ main() {
     install_gnome
     configure_gnome_keyring
     configure_gnome_software
+    install_apps_and_extensions
     install_hardware
     configure_peripherals
     configure_samba
     install_fonts
     install_appimagehub
     configure_flatpak
+    configure_snap
+    install_win11_themes
     configure_firewall
     install_firewall_sync
     install_virtualization
@@ -1380,4 +1617,5 @@ main() {
     validate_configuration
     final_validation
 }
+
 main "$@"
