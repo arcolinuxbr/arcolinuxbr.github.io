@@ -20,6 +20,8 @@ readonly EGGS_RELEASE="v26.9.24"
 readonly EGGS_RELEASE_ZIP="penguins-eggs-arch.zip"
 readonly EGGS_RELEASE_URL="https://github.com/pieroproietti/penguins-eggs/releases/download/${EGGS_RELEASE}/${EGGS_RELEASE_ZIP}"
 readonly EGGS_RELEASE_SHA256="0f1389c920ae1b3709e7c52d745c3f9eb0840d7d7a48ee8e3be218a43150c512"
+readonly CALAMARES_VERSION="v3.3.14"
+readonly CALAMARES_SOURCE_URL="https://github.com/calamares/calamares.git"
 readonly TEMP_DIR="$(mktemp -d -p "${TMPDIR:-/tmp}" penguins-eggs-setup.XXXXXX)"
 
 UPDATE=0
@@ -34,6 +36,8 @@ ISO_PREFIX=""
 SYSTEM_NAME=""
 ROOT_PASSWORD=""
 ROOT_SHADOW_BACKUP_ACTIVE=0
+CALAMARES_SUDO_RULE_ACTIVE=0
+readonly CALAMARES_SUDO_RULE="/etc/sudoers.d/99-calamares-live"
 
 restore_root_shadow() {
   if (( ROOT_SHADOW_BACKUP_ACTIVE )); then
@@ -45,7 +49,13 @@ restore_root_shadow() {
     fi
   fi
 }
-cleanup() { restore_root_shadow; rm -rf -- "${TEMP_DIR}"; }
+remove_calamares_sudo_rule() {
+  if (( CALAMARES_SUDO_RULE_ACTIVE )); then
+    sudo rm -f -- "$CALAMARES_SUDO_RULE"
+    CALAMARES_SUDO_RULE_ACTIVE=0
+  fi
+}
+cleanup() { remove_calamares_sudo_rule; restore_root_shadow; rm -rf -- "${TEMP_DIR}"; }
 trap cleanup EXIT
 on_error() { local rc=$?; printf '[ERRO] Falha na linha %s (código %s).\n' "${BASH_LINENO[0]:-?}" "$rc" >&2; exit "$rc"; }
 trap on_error ERR
@@ -141,7 +151,84 @@ prepare_root_password_for_remaster() {
   sudo cp -a -- /etc/shadow "$TEMP_DIR/shadow.host.backup"
   ROOT_SHADOW_BACKUP_ACTIVE=1
   printf 'root:%s\n' "$ROOT_PASSWORD" | sudo chpasswd
-  ok "Senha root preparada para ser capturada na ISO; a senha original será restaurada ao final."
+  ok "Senha root preparada para ser capturada na ISO; a senha original será restaurada ao terminar."
+}
+
+install_calamares_from_source() {
+  info "Instalando dependências de compilação do Calamares..."
+  sudo pacman -S --needed --noconfirm \
+    base-devel git cmake extra-cmake-modules \
+    qt6-base qt6-declarative qt6-tools qt6-svg \
+    yaml-cpp kconfig kcoreaddons kcrash ki18n kiconthemes \
+    kwidgetsaddons kpmcore solid polkit-qt6 hwinfo smartmontools \
+    ckbcomp erofs-utils archiso mkinitcpio-archiso
+
+  if pacman -Q calamares >/dev/null 2>&1; then
+    info "Removendo o Calamares pré-compilado incompatível com yaml-cpp do Arch..."
+    sudo pacman -R --noconfirm calamares
+  fi
+
+  local source_dir build_dir
+  source_dir="${TEMP_DIR}/calamares-src"
+  build_dir="${TEMP_DIR}/calamares-build"
+  git clone --depth 1 --branch "$CALAMARES_VERSION" "$CALAMARES_SOURCE_URL" "$source_dir"
+  cmake -S "$source_dir" -B "$build_dir" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DWITH_QT6=ON \
+    -DBUILD_TESTING=OFF \
+    -DWITH_PYTHONQT=OFF
+  cmake --build "$build_dir" --parallel "$(nproc)"
+  sudo cmake --install "$build_dir"
+  sudo ldconfig
+
+  command -v calamares >/dev/null 2>&1 || die "Calamares não foi encontrado após a compilação."
+  if ldd "$(command -v calamares)" | grep -q 'not found'; then
+    ldd "$(command -v calamares)" >&2
+    die "O Calamares compilado ainda possui bibliotecas ausentes."
+  fi
+  [[ -d /usr/lib/calamares/modules ]] || die "Diretório de módulos do Calamares não existe."
+  ok "Calamares ${CALAMARES_VERSION} compilado contra as bibliotecas atuais do Arch."
+}
+
+install_calamares_passwordless_policy() {
+  local policy_dir="/etc/polkit-1/actions"
+  sudo install -d -m 755 "$policy_dir"
+  cat > "$TEMP_DIR/calamares-no-password.policy" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Calamares Live ISO</vendor>
+  <vendor_url>https://calamares.io/</vendor_url>
+  <action id="com.github.calamares.calamares.pkexec.run">
+    <description>Executar o instalador Calamares</description>
+    <message>O instalador Calamares está autorizado nesta sessão live</message>
+    <icon_name>drive-harddisk</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/calamares</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+EOF
+  sudo install -m 644 "$TEMP_DIR/calamares-no-password.policy" \
+    "$policy_dir/com.github.calamares.calamares.policy"
+  ok "Calamares configurado para iniciar na sessão live sem pedir senha."
+}
+
+install_calamares_passwordless_sudo() {
+  sudo install -d -m 755 /etc/sudoers.d
+  printf '%s ALL=(root) NOPASSWD: /usr/bin/calamares\n' "$LIVE_USER" |
+    sudo tee "$CALAMARES_SUDO_RULE" >/dev/null
+  sudo chmod 440 "$CALAMARES_SUDO_RULE"
+  sudo visudo -cf "$CALAMARES_SUDO_RULE" >/dev/null || die "Regra sudo do Calamares inválida."
+  CALAMARES_SUDO_RULE_ACTIVE=1
+  ok "A ISO permitirá executar calamares sem senha para o usuário ${LIVE_USER}."
 }
 
 usage() {
@@ -301,16 +388,11 @@ fi
 ok "Configuração gravada em $EGGS_CUSTOM."
 
 if (( INSTALL_CALAMARES )); then
-  info "Instalando Calamares, seus módulos e dependências pelo pacman/Arch..."
-  # A versão v26.9.24 não possui mais o comando legado `eggs calamares`.
-  # O pacote oficial resolve as bibliotecas e instala os módulos compilados.
-  sudo pacman -S --needed --noconfirm calamares archiso mkinitcpio-archiso
-  command -v calamares >/dev/null 2>&1 || die "Calamares não foi encontrado após a instalação."
-  [[ -d /usr/lib/calamares/modules ]] || die "Diretório de módulos do Calamares não existe."
-  [[ -f /etc/calamares/settings.conf ]] || warn "/etc/calamares/settings.conf não encontrado; a configuração pode estar em outro perfil do pacote."
+  install_calamares_from_source
+  install_calamares_passwordless_policy
   module_count="$(find /usr/lib/calamares/modules -type f \( -name '*.so' -o -name '*.qml' \) 2>/dev/null | wc -l)"
   (( module_count > 0 )) || die "Nenhum módulo do Calamares foi detectado."
-  ok "Calamares instalado com $module_count arquivos de módulo; initcpio/settings foram deixados sob controle do pacote oficial."
+  ok "Calamares instalado com $module_count arquivos de módulo e sem autenticação Polkit na sessão live."
 fi
 
 if (( PRODUCE )); then
@@ -323,6 +405,7 @@ if (( PRODUCE )); then
   sudo install -d -m 755 /home/eggs
   ok "/home/eggs recriada vazia."
   prepare_root_password_for_remaster
+  install_calamares_passwordless_sudo
   if [[ "$REMASTER_MODE" == clone ]]; then
     info "Iniciando remasterização em modo clone, preservando home e usuários."
     sudo eggs remaster --clone
